@@ -1,0 +1,26 @@
+name: remote ssh command
+
+on: [push]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Executing remote SSH commands using pem file
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: ec2-user
+          key : ${{secrets.EC2_SSH_KEY}}
+          port: 22
+          script: |
+            whoami
+            echo "Deploying on EC2, logged IN"
+            sudo chown -R ec2-user:ec2-user /home/ec2-user/a-very-simple-webapp-for-assignment
+            git config --global --add safe.directory /home/ec2-user/a-very-simple-webapp-for-assignment
+            cd /home/ec2-user/a-very-simple-webapp-for-assignment
+            git pull
+            echo "Deployment script ran successfully!"
+          
+

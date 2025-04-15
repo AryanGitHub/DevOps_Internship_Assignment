@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy Whisper ASR API to ECS Fargate
+
+Parameters:
+  WhisperModel:
+    Type: String
+    Default: tiny
+    AllowedValues: [tiny, base, small, medium, large]
+    Description: Whisper model to use
+
+Resources:
+
+  WhisperVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: WhisperVPC }]
+
+  WhisperSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WhisperVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  WhisperSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WhisperVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  WhisperInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  WhisperAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref WhisperVPC
+      InternetGatewayId: !Ref WhisperInternetGateway
+
+  WhisperRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WhisperVPC
+
+  WhisperRoute:
+    Type: AWS::EC2::Route
+    DependsOn: WhisperAttachGateway
+    Properties:
+      RouteTableId: !Ref WhisperRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref WhisperInternetGateway
+
+  WhisperSubnetRouteTableAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref WhisperSubnet1
+      RouteTableId: !Ref WhisperRouteTable
+
+  WhisperSubnetRouteTableAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref WhisperSubnet2
+      RouteTableId: !Ref WhisperRouteTable
+
+  WhisperSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access
+      VpcId: !Ref WhisperVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          CidrIp: 0.0.0.0/0
+
+  WhisperCluster:
+    Type: AWS::ECS::Cluster
+
+  WhisperTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  WhisperTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: whisper-task
+      RequiresCompatibilities: [FARGATE]
+      Cpu: 512
+      Memory: 1024
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt WhisperTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: whisper
+          Image: onerahmet/openai-whisper-asr-webservice:latest
+          PortMappings:
+            - ContainerPort: 9000
+          Environment:
+            - Name: ASR_MODEL
+              Value: !Ref WhisperModel
+
+  WhisperService:
+    Type: AWS::ECS::Service
+    DependsOn: WhisperALBListener
+    Properties:
+      Cluster: !Ref WhisperCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!Ref WhisperSecurityGroup]
+          Subnets: [!Ref WhisperSubnet1, !Ref WhisperSubnet2]
+      TaskDefinition: !Ref WhisperTaskDefinition
+      LoadBalancers:
+        - ContainerName: whisper
+          ContainerPort: 9000
+          TargetGroupArn: !Ref WhisperTargetGroup
+
+  WhisperALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: whisper-alb
+      Subnets: [!Ref WhisperSubnet1, !Ref WhisperSubnet2]
+      SecurityGroups: [!Ref WhisperSecurityGroup]
+      Scheme: internet-facing
+      Type: application
+
+  WhisperTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 9000
+      Protocol: HTTP
+      VpcId: !Ref WhisperVPC
+      TargetType: ip
+      HealthCheckPath: /docs
+
+  WhisperALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WhisperALB
+      Port: 9000
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WhisperTargetGroup
+
+Outputs:
+  WhisperAPIURL:
+    Description: Whisper REST API URL
+    Value: !Join ["", ["http://", !GetAtt WhisperALB.DNSName, ":9000"]]
